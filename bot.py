@@ -13,7 +13,7 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
 # =========================
-# HASH HEDGE COIN LIST (saqlab qolindi)
+# HASH HEDGE COIN LIST
 # =========================
 RAW_SYMBOLS = [
     "BTC","ETH","LTC","BCH","TRX","FIL","CHZ","LINK","DOT","XRP","DOGE","ADA",
@@ -39,6 +39,10 @@ exchange = ccxt.binance({
     "enableRateLimit": True,
     "options": {"defaultType": "future"}
 })
+
+# Oldingi bias larni eslab qolish uchun
+prev_btc_bias = None
+prev_eth_bias = None
 
 def send_telegram(message):
     if not TELEGRAM_TOKEN or not CHAT_ID:
@@ -87,6 +91,32 @@ def get_trend(df):
         return "LONG"
     if last["close"] < last["ema21"] and last["ema21"] < last["ema50"]:
         return "SHORT"
+    return "NEUTRAL"
+
+def get_bias(symbol):
+    """1D + 4H + 1H asosida bias qaytaradi"""
+    d1 = get_data(symbol, "1d")
+    h4 = get_data(symbol, "4h")
+    h1 = get_data(symbol, "1h")
+
+    if d1 is None or h4 is None or h1 is None:
+        return "NEUTRAL"
+
+    t_d1 = get_trend(d1)
+    t_h4 = get_trend(h4)
+    t_h1 = get_trend(h1)
+
+    bull = sum(1 for t in [t_d1, t_h4, t_h1] if t == "LONG")
+    bear = sum(1 for t in [t_d1, t_h4, t_h1] if t == "SHORT")
+
+    if bull == 3:
+        return "STRONG_BULLISH"
+    if bear == 3:
+        return "STRONG_BEARISH"
+    if bull >= 2 and t_h4 == "LONG" and t_h1 == "LONG":
+        return "BULLISH"
+    if bear >= 2 and t_h4 == "SHORT" and t_h1 == "SHORT":
+        return "BEARISH"
     return "NEUTRAL"
 
 def market_structure(df):
@@ -154,35 +184,7 @@ def trigger_5m(df, direction):
         return last["close"] < last["open"] and last["close"] < last["ema9"]
     return False
 
-# =========================
-# PROFESSIONAL BTC BIAS (1D + 4H + 1H)
-# =========================
-def get_btc_bias():
-    d1 = get_data("BTC/USDT:USDT", "1d")
-    h4 = get_data("BTC/USDT:USDT", "4h")
-    h1 = get_data("BTC/USDT:USDT", "1h")
-
-    if d1 is None or h4 is None or h1 is None:
-        return "NEUTRAL"
-
-    t_d1 = get_trend(d1)
-    t_h4 = get_trend(h4)
-    t_h1 = get_trend(h1)
-
-    bull_count = sum(1 for t in [t_d1, t_h4, t_h1] if t == "LONG")
-    bear_count = sum(1 for t in [t_d1, t_h4, t_h1] if t == "SHORT")
-
-    if bull_count == 3:
-        return "STRONG_BULLISH"
-    if bear_count == 3:
-        return "STRONG_BEARISH"
-    if bull_count >= 2 and t_h4 == "LONG" and t_h1 == "LONG":
-        return "BULLISH"
-    if bear_count >= 2 and t_h4 == "SHORT" and t_h1 == "SHORT":
-        return "BEARISH"
-    return "NEUTRAL"
-
-def analyze(symbol, btc_bias):
+def analyze(symbol, btc_bias, eth_bias):
     data = {}
     for tf in TIMEFRAMES:
         df = get_data(symbol, tf)
@@ -197,21 +199,36 @@ def analyze(symbol, btc_bias):
     reasons_long = []
     reasons_short = []
 
-    # ----- BTC FILTER (eng muhim qism) -----
+    # ----- BTC + ETH FILTER -----
+    # BTC
     if btc_bias == "STRONG_BEARISH":
-        score_long -= 50
-        reasons_long.append("BTC Strong Bearish (blocked)")
+        score_long -= 35
+        reasons_long.append("BTC Strong Bearish")
     elif btc_bias == "BEARISH":
-        score_long -= 30
-        reasons_long.append("BTC Bearish filter")
+        score_long -= 20
+        reasons_long.append("BTC Bearish")
     elif btc_bias == "STRONG_BULLISH":
-        score_short -= 50
-        reasons_short.append("BTC Strong Bullish (blocked)")
+        score_short -= 35
+        reasons_short.append("BTC Strong Bullish")
     elif btc_bias == "BULLISH":
-        score_short -= 30
-        reasons_short.append("BTC Bullish filter")
+        score_short -= 20
+        reasons_short.append("BTC Bullish")
 
-    # Higher timeframes
+    # ETH
+    if eth_bias == "STRONG_BEARISH":
+        score_long -= 25
+        reasons_long.append("ETH Strong Bearish")
+    elif eth_bias == "BEARISH":
+        score_long -= 15
+        reasons_long.append("ETH Bearish")
+    elif eth_bias == "STRONG_BULLISH":
+        score_short -= 25
+        reasons_short.append("ETH Strong Bullish")
+    elif eth_bias == "BULLISH":
+        score_short -= 15
+        reasons_short.append("ETH Bullish")
+
+    # Higher timeframes of the coin itself
     for tf_name, df, points in [("1D", d1, 12), ("4H", h4, 15), ("1H", h1, 15)]:
         trend = get_trend(df)
         if trend == "LONG":
@@ -230,7 +247,7 @@ def analyze(symbol, btc_bias):
         score_short += 18
         reasons_short.append("Bearish structure")
 
-    # 15m confirmations
+    # 15m
     bos = detect_bos(m15)
     if bos == "BULLISH_BOS":
         score_long += 12
@@ -242,10 +259,10 @@ def analyze(symbol, btc_bias):
     sweep = liquidity_sweep(m15)
     if sweep == "BULLISH_SWEEP":
         score_long += 12
-        reasons_long.append("Bullish liquidity sweep")
+        reasons_long.append("Bullish sweep")
     elif sweep == "BEARISH_SWEEP":
         score_short += 12
-        reasons_short.append("Bearish liquidity sweep")
+        reasons_short.append("Bearish sweep")
 
     ob = detect_order_block(m15)
     if ob == "BULLISH_OB":
@@ -332,7 +349,8 @@ def analyze(symbol, btc_bias):
         "tp2": tp2,
         "tp3": tp3,
         "reasons": reasons,
-        "btc_bias": btc_bias
+        "btc_bias": btc_bias,
+        "eth_bias": eth_bias
     }
 
 last_signal = {}
@@ -343,9 +361,9 @@ def can_send(symbol):
         return True
     return now - last_signal[symbol] >= timedelta(minutes=SIGNAL_COOLDOWN)
 
-def process_symbol(symbol, btc_bias):
+def process_symbol(symbol, btc_bias, eth_bias):
     try:
-        signal = analyze(symbol, btc_bias)
+        signal = analyze(symbol, btc_bias, eth_bias)
         if not signal or not can_send(symbol):
             return
 
@@ -354,7 +372,8 @@ def process_symbol(symbol, btc_bias):
             f"📊 {signal['symbol']}\n"
             f"📌 {signal['direction']}\n"
             f"💯 Score: {signal['score']}/100\n"
-            f"🌐 BTC Bias: {signal['btc_bias']}\n\n"
+            f"🌐 BTC Bias: {signal['btc_bias']}\n"
+            f"Ξ ETH Bias: {signal['eth_bias']}\n\n"
             f"🎯 Entry: {signal['entry']:.8g}\n"
             f"🛑 SL: {signal['sl']:.8g}\n"
             f"✅ TP1: {signal['tp1']:.8g}\n"
@@ -369,29 +388,54 @@ def process_symbol(symbol, btc_bias):
 
         send_telegram(msg)
         last_signal[symbol] = datetime.utcnow()
-        print(signal["symbol"], signal["direction"], signal["score"], signal["btc_bias"])
+        print(signal["symbol"], signal["direction"], signal["score"])
 
     except Exception as e:
         print("Error:", symbol, e)
 
 def main():
-    print("Professional bot starting...")
+    global prev_btc_bias, prev_eth_bias
+
+    print("Professional bot starting (BTC + ETH Bias)...")
     symbols = load_symbols()
     print(f"{len(symbols)} ta coin yuklandi.")
 
     send_telegram(
         f"🤖 Hash Hedge Professional Bot ishga tushdi\n"
-        f"BTC Bias: 1D + 4H + 1H\n"
+        f"BTC + ETH Bias faol\n"
         f"Kuzatilayotgan coinlar: {len(symbols)}"
     )
 
     while True:
         start = time.time()
-        btc_bias = get_btc_bias()
-        print("BTC Bias →", btc_bias)
+
+        btc_bias = get_bias("BTC/USDT:USDT")
+        eth_bias = get_bias("ETH/USDT:USDT")
+
+        print(f"BTC Bias: {btc_bias} | ETH Bias: {eth_bias}")
+
+        # Bias o‘zgarganda xabar
+        if prev_btc_bias is not None and btc_bias != prev_btc_bias:
+            send_telegram(
+                f"⚠️ BTC BIAS O‘ZGARDI\n\n"
+                f"Oldingi: {prev_btc_bias}\n"
+                f"Hozirgi: {btc_bias}\n\n"
+                f"⏱ {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC"
+            )
+
+        if prev_eth_bias is not None and eth_bias != prev_eth_bias:
+            send_telegram(
+                f"⚠️ ETH BIAS O‘ZGARDI\n\n"
+                f"Oldingi: {prev_eth_bias}\n"
+                f"Hozirgi: {eth_bias}\n\n"
+                f"⏱ {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC"
+            )
+
+        prev_btc_bias = btc_bias
+        prev_eth_bias = eth_bias
 
         for symbol in symbols:
-            process_symbol(symbol, btc_bias)
+            process_symbol(symbol, btc_bias, eth_bias)
 
         sleep = max(8, CHECK_INTERVAL - (time.time() - start))
         time.sleep(sleep)
